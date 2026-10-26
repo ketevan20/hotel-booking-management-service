@@ -36,4 +36,8 @@ export class UsersService {
   findAllInHotel(hotelId: string) {
     return this.userModel.find({ hotelId }).sort({ createdAt: 1 });
   }
+
+  findById(id: string) {
+    return this.userModel.findById(id);
+  }
 }
