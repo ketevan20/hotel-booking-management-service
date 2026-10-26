@@ -1,26 +1,23 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CreateHotelDto } from './dto/create-hotel.dto';
 import { UpdateHotelDto } from './dto/update-hotel.dto';
+import { InjectModel } from '@nestjs/mongoose';
+import { Hotel, HotelDocument } from './schemas/hotel.schema';
+import { ClientSession, isValidObjectId, Model, Types } from 'mongoose';
 
 @Injectable()
 export class HotelsService {
-  create(createHotelDto: CreateHotelDto) {
-    return 'This action adds a new hotel';
+  constructor(@InjectModel(Hotel.name) private hotelModel: Model<Hotel>) { }
+
+  async create(
+    data: Partial<Hotel>,
+    session?: ClientSession,
+  ): Promise<HotelDocument> {
+    const [hotel] = await this.hotelModel.create([data], { session });
+    return hotel;
   }
 
-  findAll() {
-    return `This action returns all hotels`;
-  }
-
-  findOne(id: number) {
-    return `This action returns a #${id} hotel`;
-  }
-
-  update(id: number, updateHotelDto: UpdateHotelDto) {
-    return `This action updates a #${id} hotel`;
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} hotel`;
+  findById(id: string | Types.ObjectId) {
+    return this.hotelModel.findById(id);
   }
 }
