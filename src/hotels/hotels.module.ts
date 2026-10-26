@@ -8,5 +8,6 @@ import { Hotel, HotelSchema } from './schemas/hotel.schema';
   imports: [MongooseModule.forFeature([{name: Hotel.name, schema: HotelSchema}])],
   controllers: [HotelsController],
   providers: [HotelsService],
+  exports: [HotelsService]
 })
 export class HotelsModule {}

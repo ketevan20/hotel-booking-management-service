@@ -2,19 +2,6 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { Role } from 'src/enums/role.enum';
 
-@Schema({ _id: false })
-export class Session {
-    @Prop({ required: true })
-    tokenHash!: string;
-
-    @Prop({ required: true })
-    expiresAt!: Date;
-
-    @Prop({ default: () => new Date() })
-    createdAt!: Date;
-}
-const SessionSchema = SchemaFactory.createForClass(Session);
-
 @Schema({ timestamps: true })
 export class User {
     @Prop({ type: Types.ObjectId, ref: 'Hotel', required: true })
@@ -55,9 +42,6 @@ export class User {
 
     @Prop({ select: false })
     passwordResetExpiresAt?: Date;
-
-    @Prop({ type: [SessionSchema], default: [], select: false })
-    sessions!: Session[];
 
     @Prop()
     lastLoginAt?: Date;
