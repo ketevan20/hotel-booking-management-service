@@ -11,7 +11,13 @@ async function bootstrap() {
     credentials: true, // needed later for httpOnly cookies
   });
   app.use(cookieParser());
-  app.useGlobalPipes(new ValidationPipe());
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
   await app.listen(process.env.PORT ?? 3000);
 }
 bootstrap();
