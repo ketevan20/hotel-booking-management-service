@@ -20,4 +20,11 @@ export class HotelsService {
   findById(id: string | Types.ObjectId) {
     return this.hotelModel.findById(id);
   }
+
+  update(id: string | Types.ObjectId, data: UpdateHotelDto) {
+    return this.hotelModel.findByIdAndUpdate(id, data, {
+      new: true,
+      runValidators: true,
+    });
+  }
 }

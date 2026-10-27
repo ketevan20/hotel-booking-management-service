@@ -1,9 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { HotelsService } from './hotels.service';
 import { HotelsController } from './hotels.controller';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Hotel, HotelSchema } from './schemas/hotel.schema';
 
+@Global()
 @Module({
   imports: [MongooseModule.forFeature([{name: Hotel.name, schema: HotelSchema}])],
   controllers: [HotelsController],
