@@ -8,6 +8,7 @@ import { Role } from 'src/enums/role.enum';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
 import { StatusQueryDto } from './dto/status-query.dto';
 import { MaintenanceDto } from './dto/maintenance.dto';
+import { AvailableQueryDto } from './dto/available-query.dto';
 
 @UseGuards(AuthGuard, RolesGuard)
 @Controller('room-nights')
@@ -29,5 +30,10 @@ export class RoomNightsController {
   @Post('maintenance/release')
   release(@CurrentUser() user: AuthUser, @Body() dto: MaintenanceDto) {
     return this.roomNightsService.releaseMaintenance(user.hotelId, dto);
+  }
+
+  @Get('available')
+  available(@CurrentUser() user: AuthUser, @Query() query: AvailableQueryDto) {
+    return this.roomNightsService.getAvailable(user.hotelId, query.from, query.to);
   }
 }

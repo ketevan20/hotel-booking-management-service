@@ -11,6 +11,7 @@ import { CancelBookingDto } from './dto/cancel-booking.dto';
 import { CheckOutDto } from './dto/check-out.dto';
 import { AddPaymentDto } from './dto/add-payment.dto';
 import { CheckInDto } from './dto/check-in.dto';
+import { ExtendBookingDto } from './dto/extend-booking.dto';
 
 @UseGuards(AuthGuard, RolesGuard)
 @Controller('bookings')
@@ -60,5 +61,10 @@ export class BookingsController {
   @Post(':id/check-out')
   checkOut(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: CheckOutDto ) {
     return this.bookingsService.checkOut(user, id, dto);
+  }
+
+  @Post(':id/extend')
+  extend(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: ExtendBookingDto) {
+    return this.bookingsService.extend(user, id, dto);
   }
 }
