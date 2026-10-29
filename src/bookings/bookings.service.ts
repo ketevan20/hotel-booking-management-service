@@ -15,7 +15,8 @@ import { PaymentType } from 'src/enums/payments.enum';
 import { RoomNightType } from 'src/enums/roomNight.enum';
 import { ListBookingsDto } from './dto/list-bookings.dto';
 import { escapeRegex } from 'src/common/phone';
-import { BookingSortBy } from 'src/enums/bookings.enum';
+import { BookingSortBy, BookingStatus } from 'src/enums/bookings.enum';
+import { UpdateBookingDto } from './dto/update-booking.dto';
 
 @Injectable()
 export class BookingsService {
@@ -293,5 +294,293 @@ export class BookingsService {
       0,
     );
     return Math.round(sum * 100) / 100;
+  }
+
+  private async findDocument(hotelId: string, id: string) {
+    if (!isValidObjectId(id)) throw new NotFoundException();
+    const booking = await this.bookingModel.findOne({
+      _id: new Types.ObjectId(id),
+      hotelId: new Types.ObjectId(hotelId),
+    });
+    if (!booking) throw new NotFoundException();
+    return booking;
+  }
+
+  async update(actor: AuthUser, id: string, dto: UpdateBookingDto) {
+    const booking = await this.findDocument(actor.hotelId, id);
+    const hotelId = new Types.ObjectId(actor.hotelId);
+    const by = new Types.ObjectId(actor.id);
+    const isAdmin = actor.role === Role.Admin;
+
+    const structural =
+      dto.rooms !== undefined ||
+      dto.dinner !== undefined ||
+      dto.totalGuests !== undefined ||
+      dto.guestId !== undefined;
+
+    if (structural && booking.status !== BookingStatus.Confirmed) {
+      throw new ConflictException(
+        'Rooms, dates, dinner and guests can only be changed before check-in',
+      );
+    }
+    if (!structural && dto.notes === undefined && dto.source === undefined) {
+      throw new BadRequestException('Nothing to update');
+    }
+
+    const changed: string[] = [];
+    const previousTotal = booking.total;
+
+    if (dto.notes !== undefined) {
+      booking.notes = dto.notes;
+      changed.push('notes');
+    }
+    if (dto.source !== undefined) {
+      booking.source = dto.source;
+      changed.push('source');
+    }
+
+    let roomsChanged = false;
+    let newNights: {
+      hotelId: Types.ObjectId;
+      roomId: Types.ObjectId;
+      date: Date;
+      type: RoomNightType;
+      bookingId: Types.ObjectId;
+    }[] = [];
+
+    if (structural) {
+      const hotel = await this.hotelsService.findById(actor.hotelId);
+      if (!hotel) throw new NotFoundException('Hotel not found');
+      const today = todayIn(hotel.timezone);
+
+      if (dto.guestId !== undefined) {
+        const guest = await this.guestsService.findOne(actor.hotelId, dto.guestId);
+        booking.guestId = guest._id;
+        booking.guest = { name: guest.name, phone: guest.phone, country: guest.country };
+        changed.push('guest');
+      }
+
+      // --- rooms ---
+      const roomIds = dto.rooms
+        ? dto.rooms.map((r) => r.roomId)
+        : booking.rooms.map((r) => r.roomId.toString());
+      if (new Set(roomIds).size !== roomIds.length) {
+        throw new BadRequestException('A room can appear only once in a booking');
+      }
+      const roomDocs = await this.roomModel.find({
+        _id: { $in: roomIds.map((rid) => new Types.ObjectId(rid)) },
+        hotelId,
+      });
+      if (roomDocs.length !== roomIds.length) {
+        throw new NotFoundException('One or more rooms were not found');
+      }
+      const roomById = new Map(roomDocs.map((r) => [r.id, r]));
+      const existing = new Map(booking.rooms.map((r) => [r.roomId.toString(), r]));
+
+      let rooms = booking.rooms.map((r) => ({
+        roomId: r.roomId,
+        roomNumber: r.roomNumber,
+        checkIn: r.checkIn,
+        checkOut: r.checkOut,
+        listPrice: r.listPrice,
+        agreedPrice: r.agreedPrice,
+      }));
+
+      if (dto.rooms) {
+        rooms = dto.rooms.map((input) => {
+          const room = roomById.get(input.roomId)!;
+          const prev = existing.get(input.roomId);
+          if (!prev && !room.isActive) {
+            throw new NotFoundException(`Room ${room.number} is inactive`);
+          }
+
+          const checkIn = parseDay(input.checkIn);
+          const checkOut = parseDay(input.checkOut);
+          const nights = nightsBetween(checkIn, checkOut);
+          if (nights < 1 || nights > 366) {
+            throw new BadRequestException(
+              `Room ${room.number}: check-out must be after check-in, within a year`,
+            );
+          }
+
+          // a past start date is only a problem if this change introduces it
+          const startUnchanged = prev && prev.checkIn.getTime() === checkIn.getTime();
+          if (!startUnchanged && input.checkIn < today && !isAdmin) {
+            throw new ForbiddenException('Only an admin can set a start date in the past');
+          }
+
+          // keep the price this room already had; only an admin can change it
+          const currentAgreed = prev?.agreedPrice ?? room.price;
+          const agreedPrice = input.agreedPrice ?? currentAgreed;
+          if (agreedPrice !== currentAgreed && !isAdmin) {
+            throw new ForbiddenException('Only an admin can change the price');
+          }
+
+          return {
+            roomId: room._id,
+            roomNumber: room.number,
+            checkIn,
+            checkOut,
+            listPrice: prev?.listPrice ?? room.price,
+            agreedPrice,
+          };
+        });
+        roomsChanged = true;
+        changed.push('rooms');
+      }
+
+      const totalGuests = dto.totalGuests ?? booking.totalGuests;
+      const capacity = rooms.reduce(
+        (sum, r) => sum + (roomById.get(r.roomId.toString())?.capacity ?? 0),
+        0,
+      );
+      if (totalGuests > capacity) {
+        throw new BadRequestException(
+          `Total guests (${totalGuests}) exceed the capacity of the rooms (${capacity})`,
+        );
+      }
+      if (dto.totalGuests !== undefined) {
+        booking.totalGuests = totalGuests;
+        changed.push('totalGuests');
+      }
+
+      const checkIn = new Date(Math.min(...rooms.map((r) => r.checkIn.getTime())));
+      const checkOut = new Date(Math.max(...rooms.map((r) => r.checkOut.getTime())));
+
+      // --- dinner ---
+      let dinner = booking.dinner.map((d) => ({
+        from: d.from,
+        to: d.to,
+        persons: d.persons,
+        pricePerPerson: d.pricePerPerson,
+      }));
+      if (dto.dinner !== undefined) {
+        if (dto.dinner.length > 0 && !hotel.dinnerEnabled) {
+          throw new BadRequestException('Dinner is not enabled for this hotel');
+        }
+        dinner = dto.dinner.map((p) => {
+          const from = parseDay(p.from);
+          const to = parseDay(p.to);
+          // a period that already existed keeps the price it was sold at
+          const same = booking.dinner.find(
+            (d) => d.from.getTime() === from.getTime() && d.to.getTime() === to.getTime(),
+          );
+          return {
+            from,
+            to,
+            persons: p.persons,
+            pricePerPerson: same?.pricePerPerson ?? hotel.dinnerPricePerPerson,
+          };
+        });
+        changed.push('dinner');
+      }
+      for (const d of dinner) {
+        if (nightsBetween(d.from, d.to) < 1 || d.from < checkIn || d.to > checkOut) {
+          throw new BadRequestException(
+            'Dinner periods must be inside the stay. Send an updated dinner list',
+          );
+        }
+      }
+
+      const totals = calculateTotals(rooms, dinner);
+      booking.rooms = rooms;
+      booking.checkIn = checkIn;
+      booking.checkOut = checkOut;
+      booking.dinner = dinner;
+      booking.roomTotal = totals.roomTotal;
+      booking.dinnerTotal = totals.dinnerTotal;
+      booking.total = totals.total;
+
+      if (roomsChanged) {
+        newNights = rooms.flatMap((room) =>
+          eachNight(room.checkIn, room.checkOut).map((date) => ({
+            hotelId,
+            roomId: room.roomId,
+            date,
+            type: RoomNightType.Booking,
+            bookingId: booking._id,
+          })),
+        );
+      }
+    }
+
+    booking.history.push({
+      at: new Date(),
+      by,
+      action: 'updated',
+      details: { fields: changed, total: { from: previousTotal, to: booking.total } },
+    });
+
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        if (roomsChanged) {
+          await this.nightModel.deleteMany({ bookingId: booking._id }, { session });
+          await this.nightModel.insertMany(newNights, { session });
+        }
+        await booking.save({ session });
+      });
+    } catch (err) {
+      if ((err as { code?: number })?.code === 11000) {
+        throw new ConflictException(
+          'One of the rooms is already booked or blocked on some of these nights',
+        );
+      }
+      throw err;
+    } finally {
+      await session.endSession();
+    }
+
+    return this.findOne(actor.hotelId, id);
+  }
+
+  async cancel(actor: AuthUser, id: string, reason?: string) {
+    if (!isValidObjectId(id)) throw new NotFoundException();
+    const bookingId = new Types.ObjectId(id);
+    const hotelId = new Types.ObjectId(actor.hotelId);
+
+    const set: Record<string, unknown> = {
+      status: BookingStatus.Cancelled,
+      cancelledAt: new Date(),
+    };
+    if (reason) set.cancelReason = reason;
+
+    let cancelled = false;
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // the status condition makes sure two cancellations can't both succeed
+        const updated = await this.bookingModel.findOneAndUpdate(
+          { _id: bookingId, hotelId, status: BookingStatus.Confirmed },
+          {
+            $set: set,
+            $push: {
+              history: {
+                at: new Date(),
+                by: new Types.ObjectId(actor.id),
+                action: 'cancelled',
+                details: { reason: reason ?? null },
+              },
+            },
+          },
+          { new: true, session },
+        );
+        cancelled = !!updated;
+        if (updated) {
+          // the nights are released; the payments (deposit) stay as they are
+          await this.nightModel.deleteMany({ bookingId }, { session });
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!cancelled) {
+      const exists = await this.bookingModel.exists({ _id: bookingId, hotelId });
+      if (!exists) throw new NotFoundException();
+      throw new ConflictException('Only confirmed bookings can be cancelled');
+    }
+
+    return this.findOne(actor.hotelId, id);
   }
 }

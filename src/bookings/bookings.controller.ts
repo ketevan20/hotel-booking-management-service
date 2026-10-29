@@ -7,6 +7,7 @@ import type { AuthUser } from 'src/auth/guards/auth.guard'
 import { RolesGuard } from 'src/auth/guards/roles.guard';
 import { CurrentUser } from 'src/decorators/current-user.decorator';
 import { ListBookingsDto } from './dto/list-bookings.dto';
+import { CancelBookingDto } from './dto/cancel-booking.dto';
 
 @UseGuards(AuthGuard, RolesGuard)
 @Controller('bookings')
@@ -26,5 +27,15 @@ export class BookingsController {
   @Get(':id')
   getOne(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.bookingsService.findOne(user.hotelId, id);
+  }
+
+  @Patch(':id')
+  update(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: UpdateBookingDto ) {
+    return this.bookingsService.update(user, id, dto);
+  }
+
+  @Post(':id/cancel')
+  cancel(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: CancelBookingDto) {
+    return this.bookingsService.cancel(user, id, dto.reason);
   }
 }
