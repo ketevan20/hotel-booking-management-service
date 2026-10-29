@@ -21,6 +21,7 @@ import { AddPaymentDto } from './dto/add-payment.dto';
 import { CheckInDto } from './dto/check-in.dto';
 import { UpdateGuestDto } from 'src/guests/dto/update-guest.dto';
 import { CheckOutDto } from './dto/check-out.dto';
+import { ExtendBookingDto } from './dto/extend-booking.dto';
 
 @Injectable()
 export class BookingsService {
@@ -822,6 +823,193 @@ export class BookingsService {
     if (!done) {
       throw new ConflictException('This booking was just changed. Reload it and try again');
     }
+    return this.findOne(actor.hotelId, id);
+  }
+
+  async extend(actor: AuthUser, id: string, dto: ExtendBookingDto) {
+    const booking = await this.findDocument(actor.hotelId, id);
+    if (booking.status !== BookingStatus.CheckedIn) {
+      throw new ConflictException('Only checked-in bookings can be extended');
+    }
+
+    const hotelId = new Types.ObjectId(actor.hotelId);
+    const by = new Types.ObjectId(actor.id);
+    const isAdmin = actor.role === Role.Admin;
+
+    const hotel = await this.hotelsService.findById(actor.hotelId);
+    if (!hotel) throw new NotFoundException('Hotel not found');
+    const today = parseDay(todayIn(hotel.timezone));
+
+    const sent = dto.rooms.map((r) => r.roomId);
+    if (new Set(sent).size !== sent.length) {
+      throw new BadRequestException('A room can appear only once in the request');
+    }
+
+    const rooms = booking.rooms.map((r) => ({
+      roomId: r.roomId,
+      roomNumber: r.roomNumber,
+      checkIn: r.checkIn,
+      checkOut: r.checkOut,
+      listPrice: r.listPrice,
+      agreedPrice: r.agreedPrice,
+    }));
+    const used = new Set(rooms.map((r) => r.roomId.toString()));
+
+    const newNights: {
+      hotelId: Types.ObjectId;
+      roomId: Types.ObjectId;
+      date: Date;
+      type: RoomNightType;
+      bookingId: Types.ObjectId;
+    }[] = [];
+    const moved: typeof rooms = [];
+    const summary: Record<string, unknown>[] = [];
+    let extensionStart = Number.POSITIVE_INFINITY;
+
+    for (const input of dto.rooms) {
+      const entry = rooms.find((r) => r.roomId.toString() === input.roomId);
+      if (!entry) {
+        throw new BadRequestException('One of the rooms is not part of this booking');
+      }
+      const newCheckOut = parseDay(input.newCheckOut);
+      const added = nightsBetween(entry.checkOut, newCheckOut);
+      if (added < 1) {
+        throw new BadRequestException(
+          `Room ${entry.roomNumber}: the new check-out must be after the current one ` +
+          `(${entry.checkOut.toISOString().slice(0, 10)})`,
+        );
+      }
+      if (added > 366) {
+        throw new BadRequestException(`Room ${entry.roomNumber}: the extension is too long`);
+      }
+      if (entry.checkOut < today) {
+        throw new BadRequestException(
+          `Room ${entry.roomNumber}: this stay has already ended. Make a new booking for it`,
+        );
+      }
+      extensionStart = Math.min(extensionStart, entry.checkOut.getTime());
+
+      if (input.moveToRoomId) {
+        if (used.has(input.moveToRoomId)) {
+          throw new BadRequestException('The room to move to is already part of this booking');
+        }
+        const target = await this.roomModel.findOne({
+          _id: new Types.ObjectId(input.moveToRoomId),
+          hotelId,
+          isActive: true,
+        });
+        if (!target) throw new NotFoundException('The room to move to was not found');
+
+        const agreedPrice = input.agreedPrice ?? target.price;
+        if (agreedPrice !== target.price && !isAdmin) {
+          throw new ForbiddenException('Only an admin can change the price');
+        }
+        used.add(input.moveToRoomId);
+
+        const entryForTarget = {
+          roomId: target._id,
+          roomNumber: target.number,
+          checkIn: entry.checkOut, // the guest moves on the day the old stay ended
+          checkOut: newCheckOut,
+          listPrice: target.price,
+          agreedPrice,
+        };
+        moved.push(entryForTarget);
+        newNights.push(
+          ...eachNight(entryForTarget.checkIn, newCheckOut).map((date) => ({
+            hotelId,
+            roomId: target._id,
+            date,
+            type: RoomNightType.Booking,
+            bookingId: booking._id,
+          })),
+        );
+        summary.push({
+          room: entry.roomNumber,
+          movedTo: target.number,
+          from: entry.checkOut.toISOString().slice(0, 10),
+          to: input.newCheckOut,
+        });
+      } else {
+        if (input.agreedPrice !== undefined) {
+          throw new BadRequestException('The price of an extended room does not change');
+        }
+        newNights.push(
+          ...eachNight(entry.checkOut, newCheckOut).map((date) => ({
+            hotelId,
+            roomId: entry.roomId,
+            date,
+            type: RoomNightType.Booking,
+            bookingId: booking._id,
+          })),
+        );
+        summary.push({
+          room: entry.roomNumber,
+          from: entry.checkOut.toISOString().slice(0, 10),
+          to: input.newCheckOut,
+        });
+        entry.checkOut = newCheckOut;
+      }
+    }
+
+    const allRooms = [...rooms, ...moved];
+    const checkOut = new Date(Math.max(...allRooms.map((r) => r.checkOut.getTime())));
+
+    // dinner for the added nights
+    const dinner = booking.dinner.map((d) => ({
+      from: d.from,
+      to: d.to,
+      persons: d.persons,
+      pricePerPerson: d.pricePerPerson,
+    }));
+    for (const period of dto.dinner ?? []) {
+      if (!hotel.dinnerEnabled) {
+        throw new BadRequestException('Dinner is not enabled for this hotel');
+      }
+      const from = parseDay(period.from);
+      const to = parseDay(period.to);
+      if (nightsBetween(from, to) < 1 || from.getTime() < extensionStart || to > checkOut) {
+        throw new BadRequestException('Dinner periods must cover only the added nights');
+      }
+      if (dinner.some((d) => from < d.to && to > d.from)) {
+        throw new BadRequestException('A dinner period overlaps an existing one');
+      }
+      dinner.push({ from, to, persons: period.persons, pricePerPerson: hotel.dinnerPricePerPerson });
+    }
+
+    const previousTotal = booking.total;
+    const totals = calculateTotals(allRooms, dinner);
+    booking.rooms = allRooms;
+    booking.dinner = dinner;
+    booking.checkOut = checkOut;
+    booking.roomTotal = totals.roomTotal;
+    booking.dinnerTotal = totals.dinnerTotal;
+    booking.total = totals.total;
+    booking.history.push({
+      at: new Date(),
+      by,
+      action: 'extended',
+      details: { rooms: summary, total: { from: previousTotal, to: totals.total } },
+    });
+
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await this.nightModel.insertMany(newNights, { session });
+        await booking.save({ session });
+      });
+    } catch (err) {
+      if ((err as { code?: number })?.code === 11000) {
+        throw new ConflictException(
+          'A room is already booked or blocked on some of the extra nights. ' +
+          'Move that room with moveToRoomId, or choose an earlier check-out',
+        );
+      }
+      throw err;
+    } finally {
+      await session.endSession();
+    }
+
     return this.findOne(actor.hotelId, id);
   }
 }

@@ -9,6 +9,7 @@ import { RoomNightType } from 'src/enums/roomNight.enum';
 import { MaintenanceDto } from './dto/maintenance.dto';
 import { Booking } from 'src/bookings/schemas/booking.schema';
 import { BookingStatus } from 'src/enums/bookings.enum';
+import { nightsBetween } from 'src/common/pricing';
 
 @Injectable()
 export class RoomNightsService {
@@ -138,5 +139,28 @@ export class RoomNightsService {
       date: { $gte: from, $lt: to },
     });
     return { releasedNights: result.deletedCount };
+  }
+
+    // Rooms with no booking and no block on any night from `from` up to (not including) `to`
+  async getAvailable(hotelId: string, from: string, to: string) {
+    const start = parseDay(from);
+    const end = parseDay(to);
+    const nights = nightsBetween(start, end);
+    if (nights < 1 || nights > 366) {
+      throw new BadRequestException('"to" must be after "from", within a year');
+    }
+    const hId = new Types.ObjectId(hotelId);
+
+    const busyRoomIds = await this.nightModel.distinct('roomId', {
+      hotelId: hId,
+      date: { $gte: start, $lt: end },
+    });
+
+    return this.roomModel
+      .find({ hotelId: hId, isActive: true, _id: { $nin: busyRoomIds } })
+      .select('number type capacity price')
+      .collation({ locale: 'en', numericOrdering: true })
+      .sort({ number: 1 })
+      .lean();
   }
 }
