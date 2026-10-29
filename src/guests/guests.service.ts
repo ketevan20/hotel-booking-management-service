@@ -3,12 +3,16 @@ import { CreateGuestDto } from './dto/create-guest.dto';
 import { UpdateGuestDto } from './dto/update-guest.dto';
 import { InjectModel } from '@nestjs/mongoose';
 import { Guest } from './schemas/guest.schema';
-import { isValidObjectId, Model, QueryFilter, Types } from 'mongoose';
+import { ClientSession, isValidObjectId, Model, QueryFilter, Types } from 'mongoose';
 import { escapeRegex, phoneDigits } from 'src/common/phone';
+import { Booking } from 'src/bookings/schemas/booking.schema';
 
 @Injectable()
 export class GuestsService {
-  constructor(@InjectModel(Guest.name) private readonly guestModel: Model<Guest>) { }
+  constructor(
+    @InjectModel(Guest.name) private readonly guestModel: Model<Guest>,
+    @InjectModel(Booking.name) private readonly bookingModel: Model<Booking>,
+  ) { }
 
   search(hotelId: string, q?: string, limit = 20) {
     const filter: QueryFilter<Guest> = { hotelId: new Types.ObjectId(hotelId) };
@@ -38,17 +42,17 @@ export class GuestsService {
     return guest;
   }
 
-  async create(hotelId: string, dto: CreateGuestDto) {
+  async create(hotelId: string, dto: CreateGuestDto, session?: ClientSession) {
     const { allowDuplicate, ...data } = dto;
     const digits = phoneDigits(data.phone);
     if (digits && !allowDuplicate) {
       await this.assertNoDuplicatePhone(hotelId, digits);
     }
-    return this.guestModel.create({
-      ...data,
-      phoneDigits: digits,
-      hotelId: new Types.ObjectId(hotelId),
-    });
+    const [guest] = await this.guestModel.create(
+      [{ ...data, phoneDigits: digits, hotelId: new Types.ObjectId(hotelId) }],
+      { session },
+    );
+    return guest;
   }
 
   async update(hotelId: string, id: string, dto: UpdateGuestDto) {
@@ -69,7 +73,7 @@ export class GuestsService {
 
   async remove(hotelId: string, id: string) {
     const guest = await this.findOne(hotelId, id);
-    if (await this.hasBookings(guest.id)) {
+    if (await this.hasBookings(hotelId, guest._id)) {
       throw new ConflictException(
         'This guest has bookings and cannot be deleted',
       );
@@ -80,8 +84,11 @@ export class GuestsService {
 
   // TODO (bookings phase): return true if any booking references this guest.
   // Until the bookings module exists, deleting a guest is always allowed.
-  private async hasBookings(_guestId: string): Promise<boolean> {
-    return false;
+  private async hasBookings(hotelId: string, guestId: Types.ObjectId) {
+    return !!(await this.bookingModel.exists({
+      hotelId: new Types.ObjectId(hotelId),
+      guestId,
+    }));
   }
 
   // A warning, not a block: the client repeats the request with allowDuplicate: true

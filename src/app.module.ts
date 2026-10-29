@@ -9,6 +9,7 @@ import { AuthModule } from './auth/auth.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { RoomNightsModule } from './room-nights/room-nights.module';
 import { GuestsModule } from './guests/guests.module';
+import { BookingsModule } from './bookings/bookings.module';
 
 @Module({
   imports: [
@@ -19,7 +20,8 @@ import { GuestsModule } from './guests/guests.module';
     AuthModule,
     RoomsModule,
     RoomNightsModule,
-    GuestsModule
+    GuestsModule,
+    BookingsModule
   ],
   controllers: [AppController],
   providers: [AppService],

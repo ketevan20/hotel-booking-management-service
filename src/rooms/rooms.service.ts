@@ -2,12 +2,22 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { CreateRoomDto } from './dto/create-room.dto';
 import { UpdateRoomDto } from './dto/update-room.dto';
 import { InjectModel } from '@nestjs/mongoose';
-import { Room } from './schemas/room.schema';
+import { Room, RoomDocument } from './schemas/room.schema';
 import { isValidObjectId, Model, Types } from 'mongoose';
+import { HotelsService } from 'src/hotels/hotels.service';
+import { Booking } from 'src/bookings/schemas/booking.schema';
+import { RoomNight } from 'src/room-nights/schemas/room-night.schema';
+import { parseDay, todayIn } from 'src/common/dates';
+import { RoomNightType } from 'src/enums/roomNight.enum';
 
 @Injectable()
 export class RoomsService {
-  constructor(@InjectModel(Room.name) private readonly roomModel: Model<Room>,) { }
+  constructor(
+    @InjectModel(Room.name) private readonly roomModel: Model<Room>,
+    @InjectModel(Booking.name) private readonly bookingModel: Model<Booking>,
+    @InjectModel(RoomNight.name) private readonly nightModel: Model<RoomNight>,
+    private readonly hotelsService: HotelsService,
+  ) { }
 
   findAll(hotelId: string) {
     return this.roomModel
@@ -49,7 +59,11 @@ export class RoomsService {
 
   async setActive(hotelId: string, id: string, isActive: boolean) {
     const room = await this.findOne(hotelId, id);
-    // TODO (bookings phase): refuse to deactivate a room that has future bookings
+    if (!isActive && (await this.hasFutureBookings(hotelId, room))) {
+      throw new ConflictException(
+        'This room has current or future bookings. Move or cancel them first',
+      );
+    }
     room.isActive = isActive;
     room.deactivatedAt = isActive ? undefined : new Date();
     return room.save();
@@ -57,19 +71,34 @@ export class RoomsService {
 
   async remove(hotelId: string, id: string) {
     const room = await this.findOne(hotelId, id);
-    if (await this.hasBookingHistory(room.id)) {
+    if (await this.hasBookingHistory(hotelId, room)) {
       throw new ConflictException(
         'This room has bookings. Deactivate it instead of deleting it',
       );
     }
+    // only maintenance blocks can exist at this point; they go with the room
+    await this.nightModel.deleteMany({ roomId: room._id });
     await room.deleteOne();
     return { message: 'Room deleted' };
   }
 
   // TODO (bookings phase): return true if any booking ever referenced this room.
   // Until the bookings module exists, deleting a room is always allowed.
-  private async hasBookingHistory(_roomId: string): Promise<boolean> {
-    return false;
+  private async hasBookingHistory(hotelId: string, room: RoomDocument) {
+    return !!(await this.bookingModel.exists({
+      hotelId: new Types.ObjectId(hotelId),
+      'rooms.roomId': room._id,
+    }));
+  }
+
+  private async hasFutureBookings(hotelId: string, room: RoomDocument) {
+    const hotel = await this.hotelsService.findById(hotelId);
+    const today = parseDay(todayIn(hotel?.timezone ?? 'UTC'));
+    return !!(await this.nightModel.exists({
+      roomId: room._id,
+      type: RoomNightType.Booking,
+      date: { $gte: today }, // tonight counts, so a guest in the room blocks it too
+    }));
   }
 
   private toHttpError(err: unknown) {
