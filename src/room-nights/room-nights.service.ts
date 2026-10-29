@@ -1,6 +1,4 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { CreateRoomNightDto } from './dto/create-room-night.dto';
-import { UpdateRoomNightDto } from './dto/update-room-night.dto';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { RoomNight } from './schemas/room-night.schema';
 import { Connection, Model, Types } from 'mongoose';
@@ -9,6 +7,8 @@ import { Room } from 'src/rooms/schemas/room.schema';
 import { eachNight, parseDay, todayIn } from 'src/common/dates';
 import { RoomNightType } from 'src/enums/roomNight.enum';
 import { MaintenanceDto } from './dto/maintenance.dto';
+import { Booking } from 'src/bookings/schemas/booking.schema';
+import { BookingStatus } from 'src/enums/bookings.enum';
 
 @Injectable()
 export class RoomNightsService {
@@ -16,12 +16,15 @@ export class RoomNightsService {
     @InjectModel(RoomNight.name) private readonly nightModel: Model<RoomNight>,
     @InjectModel(Room.name) private readonly roomModel: Model<Room>,
     @InjectConnection() private readonly connection: Connection,
+    @InjectModel(Booking.name) private readonly bookingModel: Model<Booking>,
     private readonly hotelsService: HotelsService,
   ) { }
 
-  async getStatus(hotelId: string, date?: string) {
+    async getStatus(hotelId: string, date?: string) {
     const hotel = await this.hotelsService.findById(hotelId);
-    const day = parseDay(date ?? todayIn(hotel?.timezone ?? 'UTC'));
+    const todayStr = todayIn(hotel?.timezone ?? 'UTC');
+    const today = parseDay(todayStr);
+    const day = parseDay(date ?? todayStr);
     const hId = new Types.ObjectId(hotelId);
 
     const [rooms, nights] = await Promise.all([
@@ -33,27 +36,57 @@ export class RoomNightsService {
       this.nightModel.find({ hotelId: hId, date: day }).lean(),
     ]);
 
+    const bookingIds = nights
+      .filter((n) => n.bookingId)
+      .map((n) => n.bookingId as Types.ObjectId);
+    const bookings = bookingIds.length
+      ? await this.bookingModel
+          .find({ _id: { $in: bookingIds }, hotelId: hId })
+          .select('status guest.name checkIn checkOut')
+          .lean()
+      : [];
+    const bookingById = new Map(bookings.map((b) => [b._id.toString(), b]));
     const byRoom = new Map(nights.map((n) => [n.roomId.toString(), n]));
 
     return {
       date: day.toISOString().slice(0, 10),
       rooms: rooms.map((room) => {
         const night = byRoom.get(room._id.toString());
-        const status = !night
-          ? 'available'
-          : night.type === RoomNightType.Maintenance
-            ? 'out_of_service'
-            : 'reserved'; // 'occupied' arrives with check-in, in the bookings phase
+        const booking = night?.bookingId
+          ? bookingById.get(night.bookingId.toString())
+          : undefined;
+
+        let status = 'available';
+        if (night) {
+          if (night.type === RoomNightType.Maintenance) {
+            status = 'out_of_service';
+          } else {
+            const stayed =
+              booking?.status === BookingStatus.CheckedIn ||
+              booking?.status === BookingStatus.CheckedOut;
+            status = stayed && day <= today ? 'occupied' : 'reserved';
+          }
+        }
+
         return {
           roomId: room._id,
           number: room.number,
           type: room.type,
           status,
           bookingId: night?.bookingId ?? null,
+          booking: booking
+            ? {
+                id: booking._id,
+                status: booking.status,
+                guestName: booking.guest.name,
+                checkIn: booking.checkIn,
+                checkOut: booking.checkOut,
+              }
+            : null,
         };
       }),
     };
-  }
+  }F
 
   async blockMaintenance(hotelId: string, dto: MaintenanceDto) {
     const room = await this.roomModel.findOne({

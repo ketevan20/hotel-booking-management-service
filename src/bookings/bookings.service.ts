@@ -9,7 +9,7 @@ import { HotelsService } from 'src/hotels/hotels.service';
 import { GuestsService } from 'src/guests/guests.service';
 import { AuthUser } from 'src/auth/guards/auth.guard';
 import { Role } from 'src/enums/role.enum';
-import { eachNight, parseDay, rangeFor, todayIn } from 'src/common/dates';
+import { addDays, eachNight, parseDay, rangeFor, todayIn } from 'src/common/dates';
 import { calculateTotals, nightsBetween } from 'src/common/pricing';
 import { PaymentType } from 'src/enums/payments.enum';
 import { RoomNightType } from 'src/enums/roomNight.enum';
@@ -17,6 +17,10 @@ import { ListBookingsDto } from './dto/list-bookings.dto';
 import { escapeRegex } from 'src/common/phone';
 import { BookingSortBy, BookingStatus } from 'src/enums/bookings.enum';
 import { UpdateBookingDto } from './dto/update-booking.dto';
+import { AddPaymentDto } from './dto/add-payment.dto';
+import { CheckInDto } from './dto/check-in.dto';
+import { UpdateGuestDto } from 'src/guests/dto/update-guest.dto';
+import { CheckOutDto } from './dto/check-out.dto';
 
 @Injectable()
 export class BookingsService {
@@ -581,6 +585,243 @@ export class BookingsService {
       throw new ConflictException('Only confirmed bookings can be cancelled');
     }
 
+    return this.findOne(actor.hotelId, id);
+  }
+
+  private round(value: number) {
+    return Math.round(value * 100) / 100;
+  }
+
+  async addPayment(actor: AuthUser, id: string, dto: AddPaymentDto) {
+    const booking = await this.findDocument(actor.hotelId, id);
+    if (booking.status === BookingStatus.Cancelled) {
+      throw new ConflictException('Cancelled bookings cannot receive payments');
+    }
+
+    const isRefund = dto.type === PaymentType.Refund;
+    if (isRefund && actor.role !== Role.Admin) {
+      throw new ForbiddenException('Only an admin can record a refund');
+    }
+
+    const paid = this.paidAmount(booking.payments);
+    const balance = this.round(booking.total - paid);
+    if (isRefund && dto.amount > paid) {
+      throw new BadRequestException(`You cannot refund more than was paid (${paid})`);
+    }
+    if (!isRefund && dto.amount > balance) {
+      throw new BadRequestException(`The amount is higher than the balance (${balance})`);
+    }
+
+    const by = new Types.ObjectId(actor.id);
+    booking.payments.push({
+      type: dto.type,
+      amount: dto.amount,
+      method: dto.method,
+      date: new Date(),
+      recordedBy: by,
+      note: dto.note,
+    });
+    booking.history.push({
+      at: new Date(),
+      by,
+      action: 'payment_added',
+      details: { type: dto.type, amount: dto.amount, method: dto.method },
+    });
+    await booking.save();
+    return this.findOne(actor.hotelId, id);
+  }
+
+  async checkIn(actor: AuthUser, id: string, dto: CheckInDto) {
+    const booking = await this.findDocument(actor.hotelId, id);
+    if (booking.status !== BookingStatus.Confirmed) {
+      throw new ConflictException('Only confirmed bookings can be checked in');
+    }
+
+    const hotel = await this.hotelsService.findById(actor.hotelId);
+    const today = parseDay(todayIn(hotel?.timezone ?? 'UTC'));
+    if (today < booking.checkIn) {
+      throw new ConflictException(
+        `Too early: this booking starts on ${booking.checkIn.toISOString().slice(0, 10)}. ` +
+        'To check in earlier, move the start date first (it works only if the rooms are free)',
+      );
+    }
+    if (today >= booking.checkOut) {
+      throw new ConflictException('This booking has already ended');
+    }
+
+    const by = new Types.ObjectId(actor.id);
+    const push: Record<string, any> = {
+      history: { at: new Date(), by, action: 'checked_in' },
+    };
+
+    if (dto.deposit) {
+      const paid = this.paidAmount(booking.payments);
+      if (dto.deposit.amount > this.round(booking.total - paid)) {
+        throw new BadRequestException('The deposit is higher than the balance');
+      }
+      push.payments = {
+        type: PaymentType.Deposit,
+        amount: dto.deposit.amount,
+        method: dto.deposit.method,
+        date: new Date(),
+        recordedBy: by,
+      };
+    }
+
+    // the guest's ID/passport is saved on the guest record, not on the booking
+    const guestUpdate: UpdateGuestDto = {};
+    if (dto.idType) guestUpdate.idType = dto.idType;
+    if (dto.idNumber) guestUpdate.idNumber = dto.idNumber;
+    if (Object.keys(guestUpdate).length > 0) {
+      await this.guestsService.update(actor.hotelId, booking.guestId.toString(), guestUpdate);
+    }
+
+    // the status condition stops two staff members from checking in at once
+    const updated = await this.bookingModel.findOneAndUpdate(
+      { _id: booking._id, hotelId: booking.hotelId, status: BookingStatus.Confirmed },
+      { $set: { status: BookingStatus.CheckedIn, checkedInAt: new Date() }, $push: push },
+      { new: true },
+    );
+    if (!updated) {
+      throw new ConflictException('This booking was just changed. Reload it and try again');
+    }
+    return this.findOne(actor.hotelId, id);
+  }
+
+  // What the booking would cost if the guest left today
+  private computeCheckOut(booking: BookingDocument, today: Date) {
+    // charge at least one night; after the planned end nothing is cut
+    const departure =
+      today < booking.checkOut
+        ? new Date(Math.max(today.getTime(), addDays(booking.checkIn, 1).getTime()))
+        : booking.checkOut;
+
+    const rooms = booking.rooms
+      .map((r) => ({
+        roomId: r.roomId,
+        roomNumber: r.roomNumber,
+        checkIn: r.checkIn,
+        checkOut: new Date(Math.min(r.checkOut.getTime(), departure.getTime())),
+        listPrice: r.listPrice,
+        agreedPrice: r.agreedPrice,
+      }))
+      .filter((r) => r.checkOut > r.checkIn); // a room that was never used drops out
+
+    const dinner = booking.dinner
+      .map((d) => ({
+        from: d.from,
+        to: new Date(Math.min(d.to.getTime(), departure.getTime())),
+        persons: d.persons,
+        pricePerPerson: d.pricePerPerson,
+      }))
+      .filter((d) => d.to > d.from);
+
+    const totals = calculateTotals(rooms, dinner);
+    const paid = this.paidAmount(booking.payments);
+    return {
+      departure,
+      early: departure < booking.checkOut,
+      rooms,
+      dinner,
+      ...totals,
+      paid,
+      balance: this.round(totals.total - paid),
+    };
+  }
+
+  async checkOutSummary(hotelId: string, id: string) {
+    const booking = await this.findDocument(hotelId, id);
+    if (booking.status !== BookingStatus.CheckedIn) {
+      throw new ConflictException('Only checked-in bookings can be checked out');
+    }
+    const hotel = await this.hotelsService.findById(hotelId);
+    const today = parseDay(todayIn(hotel?.timezone ?? 'UTC'));
+
+    const result = this.computeCheckOut(booking, today);
+    return {
+      ...result,
+      departure: result.departure.toISOString().slice(0, 10),
+      currentTotal: booking.total,
+    };
+  }
+
+  async checkOut(actor: AuthUser, id: string, dto: CheckOutDto) {
+    const booking = await this.findDocument(actor.hotelId, id);
+    if (booking.status !== BookingStatus.CheckedIn) {
+      throw new ConflictException('Only checked-in bookings can be checked out');
+    }
+    if (dto.allowUnpaid && actor.role !== Role.Admin) {
+      throw new ForbiddenException('Only an admin can close a booking with an unpaid balance');
+    }
+
+    const hotel = await this.hotelsService.findById(actor.hotelId);
+    const today = parseDay(todayIn(hotel?.timezone ?? 'UTC'));
+    const c = this.computeCheckOut(booking, today);
+
+    if (c.balance < -0.005) {
+      throw new ConflictException(`The guest has overpaid by ${-c.balance}. Record a refund first`);
+    }
+    if (c.balance > 0.005 && !dto.allowUnpaid) {
+      throw new ConflictException(`The guest still owes ${c.balance}. Record the payment first`);
+    }
+
+    const checkOut = new Date(Math.max(...c.rooms.map((r) => r.checkOut.getTime())));
+    let done = false;
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const updated = await this.bookingModel.findOneAndUpdate(
+          { _id: booking._id, hotelId: booking.hotelId, status: BookingStatus.CheckedIn },
+          {
+            $set: {
+              status: BookingStatus.CheckedOut,
+              checkedOutAt: new Date(),
+              rooms: c.rooms,
+              dinner: c.dinner,
+              roomTotal: c.roomTotal,
+              dinnerTotal: c.dinnerTotal,
+              total: c.total,
+              checkOut,
+            },
+            $push: {
+              history: {
+                at: new Date(),
+                by: new Types.ObjectId(actor.id),
+                action: 'checked_out',
+                details: {
+                  early: c.early,
+                  departure: c.departure.toISOString().slice(0, 10),
+                  total: { from: booking.total, to: c.total },
+                  unpaid: dto.allowUnpaid ? c.balance : 0,
+                },
+              },
+            },
+          },
+          { new: true, session },
+        );
+        done = !!updated;
+        if (!updated) return;
+
+        // release the nights that were not used
+        for (const room of booking.rooms) {
+          const kept = c.rooms.find((r) => r.roomId.equals(room.roomId));
+          await this.nightModel.deleteMany(
+            {
+              bookingId: booking._id,
+              roomId: room.roomId,
+              date: { $gte: kept ? kept.checkOut : room.checkIn },
+            },
+            { session },
+          );
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!done) {
+      throw new ConflictException('This booking was just changed. Reload it and try again');
+    }
     return this.findOne(actor.hotelId, id);
   }
 }
