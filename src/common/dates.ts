@@ -30,3 +30,20 @@ export function todayIn(timeZone: string): string {
     day: '2-digit',
   }).format(new Date());
 }
+
+export const addDays = (day: Date, days: number) =>
+  new Date(day.getTime() + days * 24 * 60 * 60 * 1000);
+
+// from is included, to is not. Weeks start on Monday
+export function rangeFor(range: 'today' | 'week' | 'month', todayStr: string) {
+  const today = parseDay(todayStr);
+  if (range === 'today') return { from: today, to: addDays(today, 1) };
+  if (range === 'week') {
+    const offset = (today.getUTCDay() + 6) % 7; // Monday = 0
+    const from = addDays(today, -offset);
+    return { from, to: addDays(from, 7) };
+  }
+  const y = today.getUTCFullYear();
+  const m = today.getUTCMonth();
+  return { from: new Date(Date.UTC(y, m, 1)), to: new Date(Date.UTC(y, m + 1, 1)) };
+}

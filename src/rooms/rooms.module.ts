@@ -8,5 +8,6 @@ import { Room, RoomSchema } from './schemas/room.schema';
   imports: [MongooseModule.forFeature([{name: Room.name, schema: RoomSchema}])],
   controllers: [RoomsController],
   providers: [RoomsService],
+  exports: [RoomsService]
 })
 export class RoomsModule {}

@@ -3,7 +3,7 @@ import { CreateGuestDto } from './dto/create-guest.dto';
 import { UpdateGuestDto } from './dto/update-guest.dto';
 import { InjectModel } from '@nestjs/mongoose';
 import { Guest } from './schemas/guest.schema';
-import { isValidObjectId, Model, QueryFilter, Types } from 'mongoose';
+import { ClientSession, isValidObjectId, Model, QueryFilter, Types } from 'mongoose';
 import { escapeRegex, phoneDigits } from 'src/common/phone';
 
 @Injectable()
@@ -38,17 +38,17 @@ export class GuestsService {
     return guest;
   }
 
-  async create(hotelId: string, dto: CreateGuestDto) {
+  async create(hotelId: string, dto: CreateGuestDto, session?: ClientSession) {
     const { allowDuplicate, ...data } = dto;
     const digits = phoneDigits(data.phone);
     if (digits && !allowDuplicate) {
       await this.assertNoDuplicatePhone(hotelId, digits);
     }
-    return this.guestModel.create({
-      ...data,
-      phoneDigits: digits,
-      hotelId: new Types.ObjectId(hotelId),
-    });
+    const [guest] = await this.guestModel.create(
+      [{ ...data, phoneDigits: digits, hotelId: new Types.ObjectId(hotelId) }],
+      { session },
+    );
+    return guest;
   }
 
   async update(hotelId: string, id: string, dto: UpdateGuestDto) {
