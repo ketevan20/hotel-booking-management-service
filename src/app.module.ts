@@ -11,6 +11,7 @@ import { RoomNightsModule } from './room-nights/room-nights.module';
 import { GuestsModule } from './guests/guests.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { InvoicesModule } from './invoices/invoices.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 
 @Module({
   imports: [
@@ -23,7 +24,8 @@ import { InvoicesModule } from './invoices/invoices.module';
     RoomNightsModule,
     GuestsModule,
     BookingsModule,
-    InvoicesModule
+    InvoicesModule,
+    DashboardModule
   ],
   controllers: [AppController],
   providers: [AppService],

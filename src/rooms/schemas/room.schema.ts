@@ -24,6 +24,8 @@ export class Room {
   @Prop({ default: true })
   isActive!: boolean;
 
+  createdAt?: Date;
+
   // Used later so past occupancy only counts rooms that existed on those days
   @Prop()
   deactivatedAt?: Date;
