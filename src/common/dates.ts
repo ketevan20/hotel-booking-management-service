@@ -47,3 +47,13 @@ export function rangeFor(range: 'today' | 'week' | 'month', todayStr: string) {
   const m = today.getUTCMonth();
   return { from: new Date(Date.UTC(y, m, 1)), to: new Date(Date.UTC(y, m + 1, 1)) };
 }
+
+// The calendar day (YYYY-MM-DD) of a moment, in the hotel's timezone
+export function dayIn(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
