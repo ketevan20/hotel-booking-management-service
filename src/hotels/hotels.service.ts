@@ -27,4 +27,14 @@ export class HotelsService {
       runValidators: true,
     });
   }
+
+  async nextInvoiceNumber(id: string | Types.ObjectId, session?: ClientSession) {
+    const hotel = await this.hotelModel.findByIdAndUpdate(
+      id,
+      { $inc: { invoiceCounter: 1 } },
+      { new: true, session },
+    );
+    if (!hotel) throw new NotFoundException();
+    return `${hotel.invoicePrefix || 'INV-'}${String(hotel.invoiceCounter).padStart(6, '0')}`;
+  }
 }

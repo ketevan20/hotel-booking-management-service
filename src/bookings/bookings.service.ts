@@ -828,9 +828,9 @@ export class BookingsService {
 
   async extend(actor: AuthUser, id: string, dto: ExtendBookingDto) {
     const booking = await this.findDocument(actor.hotelId, id);
-    if (booking.status !== BookingStatus.CheckedIn) {
-      throw new ConflictException('Only checked-in bookings can be extended');
-    }
+    // if (booking.status !== BookingStatus.CheckedIn) {
+    //   throw new ConflictException('Only checked-in bookings can be extended');
+    // }
 
     const hotelId = new Types.ObjectId(actor.hotelId);
     const by = new Types.ObjectId(actor.id);
